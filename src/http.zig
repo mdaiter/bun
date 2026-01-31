@@ -1082,25 +1082,42 @@ fn writeToSocketWithBufferFallback(comptime is_ssl: bool, socket: NewHTTPContext
 /// Write buffered data to the socket returning true if there is backpressure
 fn writeToStreamUsingBuffer(this: *HTTPClient, comptime is_ssl: bool, socket: NewHTTPContext(is_ssl).HTTPSocket, buffer: *bun.io.StreamBuffer, data: []const u8) !bool {
     const to_send = buffer.slice();
-    if (to_send.len > 0) {
+    if (to_send.len > 0 and data.len > 0) {
+        // Fast path: send both buffered data and new data in one syscall via writev
+        const rc = socket.write2(to_send, data);
+        if (rc < 0) return error.WriteFailed;
+        const wrote: usize = @intCast(rc);
+        this.state.request_sent_len += wrote;
+        if (wrote <= to_send.len) {
+            // Partial write — didn't finish sending buffered data
+            buffer.cursor += wrote;
+            bun.handleOom(buffer.write(data));
+            return true;
+        }
+        // Buffer fully sent
+        buffer.cursor += to_send.len;
+        if (buffer.isEmpty()) {
+            buffer.reset();
+        }
+        const data_sent = wrote - to_send.len;
+        if (data_sent < data.len) {
+            bun.handleOom(buffer.write(data[data_sent..]));
+            return true;
+        }
+        return false;
+    } else if (to_send.len > 0) {
         const amount = try writeToSocket(is_ssl, socket, to_send);
         this.state.request_sent_len += amount;
         buffer.cursor += amount;
         if (amount < to_send.len) {
-            // we could not send all pending data so we need to buffer the extra data
-            if (data.len > 0) {
-                bun.handleOom(buffer.write(data));
-            }
             // failed to send everything so we have backpressure
             return true;
         }
         if (buffer.isEmpty()) {
             buffer.reset();
         }
-    }
-
-    // ok we flushed all pending data so we can reset the backpressure
-    if (data.len > 0) {
+        return false;
+    } else if (data.len > 0) {
         // no backpressure everything was sended so we can just try to send
         const sent = try writeToSocketWithBufferFallback(is_ssl, socket, buffer, data);
         this.state.request_sent_len += sent;

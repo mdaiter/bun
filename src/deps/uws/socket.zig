@@ -355,6 +355,21 @@ pub fn NewSocketHandler(comptime is_ssl: bool) type {
             };
         }
 
+        pub fn write2(this: ThisSocket, first: []const u8, second: []const u8) i32 {
+            return switch (this.socket) {
+                .connected => |socket| socket.write2(is_ssl, first, second),
+                .connecting, .detached => 0,
+                .upgradedDuplex, .pipe => {
+                    const a = this.write(first);
+                    if (a < 0) return a;
+                    if (@as(usize, @intCast(a)) < first.len) return a;
+                    const b = this.write(second);
+                    if (b < 0) return b;
+                    return a + b;
+                },
+            };
+        }
+
         pub fn writeFd(this: ThisSocket, data: []const u8, file_descriptor: bun.FileDescriptor) i32 {
             return switch (this.socket) {
                 .upgradedDuplex, .pipe => this.write(data),
